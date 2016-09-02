@@ -1,0 +1,382 @@
+
+library(rpanel)
+library(xlsx)
+library(rjags)
+library(maps)
+library(spatstat)
+library(sp)
+library(lgcp)
+library(RandomFields)
+library(ncdf4)
+library(ncdf.tools)
+
+
+mass_shooting<-read.xlsx("MassShootings_final.xlsx", sheetName = "US mass shootings", header = TRUE)
+
+
+##Cleaning the data##
+  
+  
+mass_shooting<-mass_shooting[-c(76:108),]#Removes the NA values that were generated at the end of the dataset by excel.
+mass_shooting<-mass_shooting[-c(46),]
+
+mass_shooting$"Total Number of Weapons"<-rowSums(mass_shooting[,26:29])
+#head(mass_shooting$Location)
+
+#Changing anything that wasn't a zero to a 1 in the following categories.
+mass_shooting$Semiauto.handguns[mass_shooting$Semiauto.handguns!=0]<-1
+mass_shooting$Rifles[mass_shooting$Rifles!=0]<-1
+mass_shooting$Revolvers[mass_shooting$Revolvers!=0]<-1
+mass_shooting$Shotguns[mass_shooting$Shotguns!=0]<-1
+
+#Changing any more categorical variables into Dummy variables.
+
+mass_shooting$MalePerp <- ifelse(mass_shooting$Gender=="Male", 1,0) 
+mass_shooting$FemalePerp <- ifelse(mass_shooting$Gender =="Female", 1, 0)
+mass_shooting$Mental.Health.No <- ifelse(mass_shooting$Mental.Health.Status =="0", 1,0)
+mass_shooting$Mental.Health.Possible <- ifelse(mass_shooting$Mental.Health.Status=="1", 1, 0)
+mass_shooting$Mental.Health.Yes <- ifelse(mass_shooting$Mental.Health.Status=="2", 1, 0)
+mass_shooting$t<-mass_shooting$Year-1982
+mass_shooting$NonFatal <- mass_shooting$Total.victims-mass_shooting$Fatalities
+
+#Adding Interactions
+mass_shooting$LongLat <- mass_shooting$longitude*mass_shooting$latitude
+mass_shooting$latsq <- (mass_shooting$latitude)^2
+mass_shooting$longsq <- (mass_shooting$longitude)^2
+
+
+
+##Shortcut for variables##
+  
+Fatalities <- mass_shooting$Fatalities
+Victims <- mass_shooting$Total.victims
+State <- mass_shooting$State
+
+Guns.Used<- mass_shooting$`Total Number of Weapons`
+Rifle<- mass_shooting$Rifles
+Semi.Hand<- mass_shooting$Semiauto.handguns
+Shotguns<- mass_shooting$Shotguns
+Revolvers<- mass_shooting$Revolvers
+Male<-mass_shooting$MalePerp
+Female<-mass_shooting$FemalePerp
+White<-mass_shooting$White
+Asian<-mass_shooting$Asian
+Black<-mass_shooting$Black
+Latino<-mass_shooting$Latino
+Native<-mass_shooting$Native.American
+RaceOther<-mass_shooting$Other.Race
+Legal<-mass_shooting$Legal
+Illegal<-mass_shooting$Illegal
+WeapUnk<-mass_shooting$Unknown.Weapon.obtained
+Military<-mass_shooting$Military
+Religious<-mass_shooting$Religious
+School<-mass_shooting$School
+Workplace<-mass_shooting$Workplace
+VenueOther<-mass_shooting$Other.Venue
+Y_ill<-mass_shooting$Mental.Health.Yes
+N_ill<-mass_shooting$Mental.Health.No
+Poss_ill<-mass_shooting$Mental.Health.Possible
+lat<-mass_shooting$latitude
+long<-mass_shooting$longitude
+latlong<-mass_shooting$LongLat
+latsq<-mass_shooting$latsq
+longsq<-mass_shooting$longsq
+NonFatal<- mass_shooting$NonFatal
+PopT<-mass_shooting$PopulationT
+
+
+
+
+##Variable Selection for non fatal victims as the response##
+  
+  
+  
+n <- length(NonFatal)
+
+model_string <- "model{
+
+# Likelihood
+for (i in 1:n){
+NonFatal[i] ~ dpois(lam[i])
+log(lam[i]) <- beta[1] + beta[2]*Guns.Used[i]+ beta[3]*Semi.Hand[i]+ beta[4]*Shotguns[i]+ beta[5]*Revolvers[i]+ beta[6]*Male[i]+ beta[7]*Female[i]+ beta[8]*White[i]+ beta[9]*Asian[i]+ beta[10]*Black[i]+beta[11]*Latino[i]+beta[12]*Native[i]+ beta[13]*RaceOther[i]+ beta[14]*Legal[i]+ beta[15]*Illegal[i]+ beta[16]*WeapUnk[i]+ beta[17]*Military[i]+ beta[18]*Religious[i]+ beta[19]*School[i]+ beta[20]*Workplace[i]+ beta[21]*VenueOther[i]+ beta[22]*Y_ill[i]+ beta[23]*N_ill[i]+ beta[24]*Poss_ill[i]+ beta[25]*Fatalities[i]+ beta[26]*lat[i]+ beta[27]*long[i]+ beta[28]*latlong[i]+ beta[29]*latsq[i]+ beta[30]*longsq[i]+ log(PopT[i])
+}
+
+#Priors
+for(j in 1:30){
+gamma[j] ~ dnorm(mu[j],inv[j])
+delta[j] ~ dbern(0.5)
+beta[j]  <- gamma[j]*delta[j]
+}
+
+#Hyperpriors
+for(j in 1:30){
+mu[j]~dnorm(0, 0.001)
+inv[j]~dgamma(0.0001, 0.0001)
+}
+
+
+}"
+
+ssvs <- jags.model(file     = textConnection(model_string), 
+                   data     = list(NonFatal=NonFatal, Fatalities=Fatalities, Guns.Used=Guns.Used, Semi.Hand=Semi.Hand, Shotguns=Shotguns, Revolvers=Revolvers, Male=Male, Female=Female, White=White, Asian=Asian, Black=Black, Latino=Latino, Native=Native, RaceOther=RaceOther, Legal=Legal, Illegal=Illegal, WeapUnk=WeapUnk, Military=Military, Religious=Religious, School=School, Workplace=Workplace, VenueOther=VenueOther, Y_ill=Y_ill, N_ill=N_ill, Poss_ill=Poss_ill, lat=lat, long=long, latlong=latlong, latsq=latsq, longsq=longsq, PopT=PopT, n=n),
+                   n.chains = 3
+)
+
+update(ssvs, 10000)
+
+samps <- coda.samples(ssvs, variable.names=c("beta","delta", "gamma"), thin=100, n.iter=300000)
+
+samp <- rbind(samps[[1]],samps[[2]],samps[[3]])
+
+beta <- samp[,1:30]
+delta <- samp[,1:30+30]
+gamma<- samp[, 1:30]
+colnames(beta) <- colnames(delta) <- colnames(State)
+
+
+# Plotting the Inclusion probabilities
+quartz()
+boxplot(gamma,outline=FALSE)
+
+plot(samps)
+
+for(j in 1:30){
+  quartz()
+  hist(gamma[,j],breaks=100,main=paste("Posterior distribuiton of gamma",j),ylab="Density",xlab=expression(gamma))
+}
+
+#Marginal inclusion probabilities
+inprob <- colMeans(delta)
+round(inprob,2)
+
+
+#Find the ten models with highest posterior probability
+summary(samp)
+autocorr(samp)
+
+model <- NULL
+id <- c(1:30)
+for(i in 1:nrow(delta)){
+  model[i] <- paste(id[delta[i,]==1],collapse=" & ")
+}
+
+delta[1:5,]
+
+
+#The 10 most likely models (using approximate posterior probabilities):
+
+model_probs <- table(model)/nrow(delta)
+model_probs <- sort(model_probs,decreasing = TRUE)
+round(model_probs[1:10],3)
+
+
+
+##Convergence diagnostics for the non fatal victims Model##
+  
+  
+source("/Users/alexandriamelton/Desktop/DBDA2Eprograms/DBDA2E-utilities.R")
+quartz() 
+diagMCMC(codaObject = samps, parName = "gamma[25]")
+DbdaAcfPlot(samps , parName="gamma[1]")
+
+
+##Variable Selection for fatalities as the response##
+  
+  
+  
+n <- length(Fatalities)
+
+model_string <- "model{
+
+# Likelihood
+for (i in 1:n){
+Fatalities[i] ~ dpois(lam[i])
+log(lam[i]) <- beta[1] + beta[2]*Guns.Used[i]+ beta[3]*Semi.Hand[i]+ beta[4]*Shotguns[i]+ beta[5]*Revolvers[i]+ beta[6]*Male[i]+ beta[7]*Female[i]+ beta[8]*White[i]+ beta[9]*Asian[i]+ beta[10]*Black[i]+beta[11]*Latino[i]+beta[12]*Native[i]+ beta[13]*RaceOther[i]+ beta[14]*Legal[i]+ beta[15]*Illegal[i]+ beta[16]*WeapUnk[i]+ beta[17]*Military[i]+ beta[18]*Religious[i]+ beta[19]*School[i]+ beta[20]*Workplace[i]+ beta[21]*VenueOther[i]+ beta[22]*Y_ill[i]+ beta[23]*N_ill[i]+ beta[24]*Poss_ill[i]+ beta[25]*NonFatal[i]+ beta[26]*lat[i]+ beta[27]*long[i]+ beta[28]*latlong[i]+ beta[29]*latsq[i]+ beta[30]*longsq[i]+ log(PopT[i])
+}
+
+#Priors
+for(j in 1:30){
+gamma[j] ~ dnorm(mu[j],inv[j])
+delta[j] ~ dbern(0.5)
+beta[j]  <- gamma[j]*delta[j]
+}
+
+#Hyperpriors
+for(j in 1:30){
+mu[j]~dnorm(0, 0.001)
+inv[j]~dgamma(0.0001, 0.0001)
+}
+
+
+}"
+
+ssvs <- jags.model(file     = textConnection(model_string), 
+                   data     = list(NonFatal=NonFatal, Fatalities=Fatalities, Guns.Used=Guns.Used, Semi.Hand=Semi.Hand, Shotguns=Shotguns, Revolvers=Revolvers, Male=Male, Female=Female, White=White, Asian=Asian, Black=Black, Latino=Latino, Native=Native, RaceOther=RaceOther, Legal=Legal, Illegal=Illegal, WeapUnk=WeapUnk, Military=Military, Religious=Religious, School=School, Workplace=Workplace, VenueOther=VenueOther, Y_ill=Y_ill, N_ill=N_ill, Poss_ill=Poss_ill, lat=lat, long=long, latlong=latlong, latsq=latsq, longsq=longsq, PopT=PopT, n=n),
+                   n.chains = 3
+)
+
+update(ssvs, 10000)
+
+samps <- coda.samples(ssvs, variable.names=c("beta","delta", "gamma"), thin=100, n.iter=500000)
+
+samp <- rbind(samps[[1]],samps[[2]],samps[[3]])
+
+beta <- samp[,1:30]
+delta <- samp[,1:30+30]
+gamma<- samp[, 1:30]
+colnames(beta) <- colnames(delta) <- colnames(State)
+
+
+# Plotting the Inclusion probabilities
+quartz()
+boxplot(gamma,outline=FALSE)
+
+plot(samps)
+
+for(j in 1:30){
+  quartz()
+  hist(gamma[,j],breaks=100,main=paste("Posterior distribuiton of gamma",j),ylab="Density",xlab=expression(gamma))
+}
+
+#Marginal inclusion probabilities
+inprob <- colMeans(delta)
+round(inprob,2)
+
+
+#Find the ten models with highest posterior probability
+summary(samp)
+autocorr(samp)
+
+model <- NULL
+id <- c(1:30)
+for(i in 1:nrow(delta)){
+  model[i] <- paste(id[delta[i,]==1],collapse=" & ")
+}
+
+delta[1:5,]
+
+
+#The 10 most likely models (using approximate posterior probabilities):
+
+model_probs <- table(model)/nrow(delta)
+model_probs <- sort(model_probs,decreasing = TRUE)
+round(model_probs[1:10],3)
+
+
+
+##Convergence diagnostics for the fatalities Model##
+  
+source("/Users/alexandriamelton/Desktop/DBDA2Eprograms/DBDA2E-utilities.R")
+quartz() 
+diagMCMC(codaObject = samps, parName = "gamma[25]")
+DbdaAcfPlot(samps , parName="gamma[1]")
+
+
+
+##Poisson Regression: nonfatal victims##
+  
+  
+n <- length(NonFatal)
+# Model specification
+
+model_string <- "model {
+
+##Likelihood
+for (i in 1:n){
+NonFatal[i] ~ dpois(lam[i])
+log(lam[i]) <- beta[1]+ beta[2]*Shotguns[i]+ beta[3]*Revolvers[i]+ beta[4]*Female[i]+ beta[5]*Asian[i]+ beta[6]*Black[i]+ beta[7]*WeapUnk[i]+ beta[8]*Military[i]+ beta[9]*School[i]+ beta[10]*VenueOther[i]+ beta[11]*Y_ill[i]+beta[12]*Fatalities[i]+ beta[13]*long[i]+ beta[14]*Guns.Used[i]+ beta[15]*Semi.Hand[i]+ log(PopT[i])
+}
+
+##Priors
+for(i in 1:15){
+beta[i] ~ dnorm(0,0.0001)
+}
+
+}"
+
+
+# Compile the model
+
+model <- jags.model(file     = textConnection(model_string), 
+                    data     = list(NonFatal=NonFatal, Guns.Used=Guns.Used, Semi.Hand=Semi.Hand, Shotguns=Shotguns, Revolvers=Revolvers, Female=Female, Asian=Asian, Black=Black, WeapUnk=WeapUnk, Military=Military, School=School, VenueOther=VenueOther, Y_ill=Y_ill, long=long, Fatalities=Fatalities, PopT=PopT,n=n),
+                    n.chains = 3
+)
+
+
+# Draw samples
+
+update(model, 10000)
+
+samp <- coda.samples(model,variable.names=c("beta"),n.iter=300000, thin = 10)
+
+# Summarize results
+
+a<-summary(samp)
+autocorr.plot(samp)
+quartz()
+
+plot(samp)
+diagMCMC(codaObject = samp, parName = "beta[1]")
+
+
+
+##Poisson Regression: fatalities##
+  
+  
+n <- length(Fatalities)
+# Model specification
+
+model_string <- "model {
+
+##Likelihood
+for (i in 1:n){
+Fatalities[i] ~ dpois(lam[i])
+log(lam[i]) <- beta[1]+ beta[2]*Male[i]+ beta[3]*Illegal[i]+ beta[4]*VenueOther[i]+ beta[5]*Y_ill[i]+ beta[6]*N_ill[i]+ beta[7]*Poss_ill[i]+ beta[8]*NonFatal[i]+ beta[9]*longsq[i]+ log(PopT[i])
+}
+
+##Priors
+for(i in 1:9){
+beta[i] ~ dnorm(0,0.0001)
+}
+
+}"
+
+
+# Compile the model
+
+model <- jags.model(file     = textConnection(model_string), 
+                    data     = list(NonFatal=NonFatal, Male=Male, Illegal = Illegal, VenueOther=VenueOther, Y_ill=Y_ill, N_ill= N_ill, Poss_ill=Poss_ill, Fatalities = Fatalities, longsq=longsq, PopT=PopT,n=n),
+                    n.chains = 3
+)
+
+
+# Draw samples
+
+update(model, 10000)
+
+samp <- coda.samples(model,variable.names=c("beta"),n.iter=300000, thin = 10)
+
+# Summarize results
+
+a<-summary(samp)
+autocorr.plot(samp)
+quartz()
+
+plot(samp)
+diagMCMC(codaObject = samp, parName = "beta[1]")
+
+
+##Mapping Intensity Function##
+  
+  
+map_us<-map("usa")
+x<-map_us$x
+y<- map_us$y
+coor<- data.frame(x,y)
+coor<- na.omit(coor)
+W<-owin(poly=coor)
+data1 <- cbind(mass_shooting$longitude, mass_shooting$latitude, mass_shooting$t)
+tlim<- c(0,34)
+xyt <- stppp(list(data=data1, tlim=tlim, window=W))
+den <- lambdaEst(xyt)
+#color palette saved as 0.33
